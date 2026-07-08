@@ -126,3 +126,61 @@ purely `elif days_since_last == 1:`. I then verified both sides of the boundary:
 **AI usage.** I used Claude to confirm what `datetime.weekday()` returns for each day
 (Monday=0 … Sunday=6) after I had already narrowed the bug to that comparison. The
 diagnosis and fix were verified by reading the code and running the reproduction myself.
+
+---
+
+### Issue #2 — Friends Listening Now shows people from yesterday
+
+**How I reproduced it.** I set up two friends against an in-memory DB and controlled their
+listening times relative to the start of the current calendar day:
+- `darius` — a `ListeningEvent` one minute *before* midnight today (i.e. 23:59 yesterday),
+- `sam` — a `ListeningEvent` one minute *after* midnight today.
+
+Calling `get_friends_listening_now` returned **both** `darius` and `sam`. darius listened
+yesterday evening yet still showed as "listening now" — exactly nova's report that
+darius's 11pm listen was still in her feed at 9am. The event at 23:59 yesterday is on a
+previous calendar day but is always less than 24 hours old, which is what made it linger.
+
+**How I found the root cause.** The README pointed at `feed_service.py`. I read
+`get_friends_listening_now` top-down and saw it computed a `cutoff` and filtered
+`ListeningEvent.listened_at >= cutoff`. The cutoff was
+`datetime.now(timezone.utc) - RECENT_THRESHOLD` with `RECENT_THRESHOLD = timedelta(hours=24)`.
+That is a *rolling 24-hour window*, not a *today* filter. I confirmed by noting that any
+event between (now − 24h) and the previous midnight is from yesterday yet passes the
+filter — precisely the 23:59-yesterday case I had reproduced.
+
+**The root cause.** In [feed_service.py](services/feed_service.py), "listening now" was
+implemented as a rolling 24-hour lookback:
+
+```python
+RECENT_THRESHOLD = timedelta(hours=24)
+...
+cutoff = datetime.now(timezone.utc) - RECENT_THRESHOLD
+```
+
+The feature is supposed to show friends who have listened *today* (the current calendar
+day). A rolling 24-hour window instead keeps each evening's listens visible until the same
+clock time the next day, so at 9am you still see everything from after 9am yesterday —
+including last night's plays. The bug is the choice of window boundary: elapsed-time
+(now − 24h) instead of calendar-day (start of today).
+
+**My fix and side-effect check.** I replaced the rolling threshold with the start of the
+current UTC calendar day:
+
+```python
+now = datetime.now(timezone.utc)
+cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+```
+
+and removed the now-unused `RECENT_THRESHOLD` constant and `timedelta` import. Boundary
+check on both sides: an event at 23:59 yesterday is now **excluded**, and an event at
+00:01 today is still **included**. I confirmed the other feed function,
+`get_activity_feed`, is intentionally *not* recency-filtered (its docstring says so and it
+uses no cutoff), so it is unaffected. The full test suite shows no new failures — the only
+failing tests are the pre-existing playlist ones (Issue #5), which this change does not
+touch.
+
+**AI usage.** I used Claude to navigate to the right service and to sanity-check that
+`datetime.replace(hour=0, ...)` gives the correct UTC start-of-day. I formed and verified
+the "rolling window vs. calendar day" diagnosis by reading the code and running the
+boundary reproduction myself.
