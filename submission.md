@@ -184,3 +184,65 @@ touch.
 `datetime.replace(hour=0, ...)` gives the correct UTC start-of-day. I formed and verified
 the "rolling window vs. calendar day" diagnosis by reading the code and running the
 boundary reproduction myself.
+
+---
+
+### A note on Issue #3 (why I chose Issue #5 as my third bug)
+
+I initially investigated Issue #3 (duplicate search results) and could **not reproduce the
+user-visible symptom** with the shipped code. Tracing it: `search_songs` in
+[search_service.py](services/search_service.py) does
+`db.session.query(Song).outerjoin(song_tags, ...)`. That join genuinely fans out one row
+per tag — I confirmed **3 raw rows** at the SQL level for the 3-tag song "Crown Heights
+Anthem." However, SQLAlchemy 2.0's legacy `Query` API automatically deduplicates entity
+rows by primary key, so `.all()` collapses those 3 rows back to a single `Song`, and no
+duplicates reach the response. The repo's own `test_search_no_duplicates_multi_tag_song`
+passes for this reason. The join is a latent defect, but the symptom is masked in this
+environment. Following the brief's guidance ("if you can't reproduce a bug after a genuine
+attempt, try a different one"), I chose the cleanly reproducible Issue #5 as my third fix.
+
+---
+
+### Issue #5 — The last song in a playlist never shows up
+
+**How I reproduced it.** Against the seeded database I loaded the "Friday Energy" playlist
+(darius's, the one in his report). I counted its rows in the `playlist_entries` table and
+compared to what `get_playlist_songs` returned: the table had **7** entries but the
+function returned only **6**, and the missing one was "Harlem Renaissance" — the entry with
+the highest `position`, i.e. the most recently added. This matches darius's report exactly
+("says 7, shows 6; the missing one is always the newest").
+
+**How I found the root cause.** The README issue table pointed at `playlist_service.py`. I
+read `get_playlist_songs` top-down. The query is correct: it joins `playlist_entries`,
+filters by `playlist_id`, and orders by ascending `position`. The bug is in the very last
+line — the return statement slices the ordered list with `songs[:-1]`.
+
+**The root cause.** In [playlist_service.py](services/playlist_service.py) the function
+ended with:
+
+```python
+return [song.to_dict() for song in songs[:-1]]
+```
+
+`songs` is already correctly ordered by playlist position (ascending), so `songs[:-1]`
+drops the final element — the highest-position, most-recently-added song — on every call.
+That is why the newest song is always the one missing, and why adding another song
+"frees" the previous one: the previously-last song is no longer last, so it stops being
+sliced off, and the brand-new song becomes the new last element that gets dropped. The
+function's own docstring says it "returns all songs in the playlist," so the slice
+directly contradicts the intended behavior.
+
+**My fix and side-effect check.** I changed `songs[:-1]` to `songs` so every song in the
+playlist is returned. Boundary checks:
+- "Friday Energy" now returns all **7** songs, in correct position order.
+- Empty playlist still returns `[]` (an empty list sliced or not is still empty) — the
+  `test_empty_playlist_returns_empty_list` test passes.
+- A single-song playlist, which `[:-1]` would have returned as empty, now correctly
+  returns its one song.
+- The full test suite passes 13/13, including `test_playlist_returns_all_songs` and
+  `test_playlist_returns_songs_in_order`, which previously failed against the bug.
+
+**AI usage.** I used Claude to locate the service and confirm the query ordering was
+correct so I could rule the query out and focus on the return statement. The `[:-1]`
+diagnosis and the "adding a song frees the previous one" explanation I verified by reading
+the code and reproducing against the seeded playlist myself.
