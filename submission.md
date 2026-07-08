@@ -1,5 +1,49 @@
 # Project 5 — Mixtape Bug Hunt — Submission
 
+Branch: `bugfix/mixtape` — three fixes, one commit each (`fix:` conventional format):
+
+- `af2e4f8` fix: remove spurious Sunday guard that reset listening streaks (Issue #1)
+- `5dee08a` fix: scope Friends Listening Now to today, not a rolling 24h window (Issue #2)
+- `384fd6b` fix: return all playlist songs instead of dropping the last one (Issue #5)
+
+## AI Usage
+
+I used an AI coding assistant (Claude) throughout this project. Being specific about how,
+since navigation and debugging — not code generation — were the main uses here.
+
+**Codebase orientation.** I asked the AI to summarize what each service file is
+responsible for and to trace the route→service call chains (e.g. "what happens when a user
+hits `POST /songs/<id>/listen`?"). This gave me a fast mental model of the "thin route,
+logic in services" pattern, which I then confirmed by reading `app.py` and the blueprints
+myself. I wrote the codebase map below from my own reading after using the summaries to
+orient.
+
+**Fact-checking during debugging.** I used the AI to confirm specific language and library
+facts once I had already narrowed a bug down myself, rather than to find the bugs:
+- *Issue #1:* After I had traced the reset to a date comparison, I asked the AI to confirm
+  what `datetime.weekday()` returns for each day (Mon=0 … Sun=6). That confirmed my reading
+  that `today.weekday() != 6` was singling out Sundays.
+- *Issue #2:* I asked the AI to confirm that `datetime.replace(hour=0, minute=0, ...)` is a
+  correct way to get UTC start-of-day, to back up the fix I had already decided on.
+- *Issue #5:* I asked the AI to sanity-check my reading of the SQL `ORDER BY position`
+  clause so I was confident the query was correct and the defect was in the return line.
+
+**Where an AI explanation alone would have been wrong.** The clearest example was
+**Issue #3 (duplicate search results)**. The seed data and repo tests strongly imply the
+`outerjoin(song_tags)` returns duplicate rows, and a generic AI explanation would happily
+say "the join fans out, add `.distinct()`." But when I reproduced it, the duplicates did
+**not** appear: SQLAlchemy 2.0's legacy `Query` API auto-deduplicates entity rows by
+primary key. I found this by running the query two ways and comparing — selecting the full
+`Song` entity (1 row) versus selecting `(Song.id, tag_id)` columns (3 rows). This is the
+case where reproducing and verifying beat trusting a plausible-sounding explanation, and
+it's why I swapped my third bug to Issue #5 (per the brief's guidance to pick a different
+bug when one genuinely can't be reproduced).
+
+**General workflow.** My loop was: read the code and form a hypothesis → reproduce and
+verify against real data → confirm any uncertain library/language fact (sometimes with the
+AI) → implement the smallest fix → re-check boundaries and run the test suite. I used the
+AI to speed up navigation and to fact-check, not to diagnose or write the fixes.
+
 ## Codebase Map
 
 Mixtape is a Flask app using an application-factory pattern. Every HTTP route is thin:
@@ -69,14 +113,6 @@ service function. All the bugs live in the `services/` layer.
   re-attach `timezone.utc` (`last_listened.replace(tzinfo=timezone.utc)`).
 - **Association tables carry data** (`playlist_entries.position`, `song_tags`), so joins
   through them can fan out rows — relevant to search/playlist bugs.
-
-### AI usage disclosure
-
-I used Claude Code to help navigate the unfamiliar codebase: summarizing each service
-file's responsibility and tracing the route→service call chains. For each bug I formed the
-hypothesis by reading the code myself, then verified it by reproducing the behavior with a
-small script against a controlled in-memory database before editing. AI-assisted steps are
-noted per-issue below.
 
 ---
 
@@ -180,10 +216,10 @@ uses no cutoff), so it is unaffected. The full test suite shows no new failures 
 failing tests are the pre-existing playlist ones (Issue #5), which this change does not
 touch.
 
-**AI usage.** I used Claude to navigate to the right service and to sanity-check that
-`datetime.replace(hour=0, ...)` gives the correct UTC start-of-day. I formed and verified
-the "rolling window vs. calendar day" diagnosis by reading the code and running the
-boundary reproduction myself.
+**AI usage.** The README issue table told me which service to open. I used Claude only to
+sanity-check that `datetime.replace(hour=0, ...)` gives the correct UTC start-of-day. I
+formed and verified the "rolling window vs. calendar day" diagnosis by reading the code
+and running the boundary reproduction myself.
 
 ---
 
@@ -242,7 +278,8 @@ playlist is returned. Boundary checks:
 - The full test suite passes 13/13, including `test_playlist_returns_all_songs` and
   `test_playlist_returns_songs_in_order`, which previously failed against the bug.
 
-**AI usage.** I used Claude to locate the service and confirm the query ordering was
-correct so I could rule the query out and focus on the return statement. The `[:-1]`
-diagnosis and the "adding a song frees the previous one" explanation I verified by reading
-the code and reproducing against the seeded playlist myself.
+**AI usage.** The README issue table told me which service to open. I used Claude only to
+confirm my reading of the query's `ORDER BY position` clause so I could rule the query out
+and focus on the return statement. The `[:-1]` diagnosis and the "adding a song frees the
+previous one" explanation I found by reading the code and reproducing against the seeded
+playlist myself.
